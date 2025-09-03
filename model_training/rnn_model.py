@@ -1,16 +1,14 @@
 import torch 
 from torch import nn
 
-import torch
-from torch import nn
-
 
 class GRUDecoder(nn.Module):
+
     def __init__(self, neural_dim, n_units, n_days, n_classes,
                  rnn_dropout=0.2, input_dropout=0.1, n_layers=3,
                  bidirectional=False, patch_size=0, patch_stride=0,
                  sequence_output=True, hidden_fc=256):
-        super().__init__()
+        super(GRUDecoder, self).__init__()
 
         self.neural_dim = neural_dim
         self.n_units = n_units
@@ -140,7 +138,7 @@ class GRUDecoder1(nn.Module):
         patch_size  (int)      - the number of timesteps to concat on initial input layer - a value of 0 will disable this "input concat" step 
         patch_stride(int)      - the number of timesteps to stride over when concatenating initial input 
         '''
-        super(GRUDecoder, self).__init__()
+        super(GRUDecoder1, self).__init__()
         
         self.neural_dim = neural_dim
         self.n_units = n_units
