@@ -100,7 +100,6 @@ class BrainToTextDecoder_Trainer:
         self.logger.info(f'Using device: {self.device}')
         
 
-
         # Set seed if provided 
         if self.args['seed'] != -1:
             np.random.seed(self.args['seed'])
@@ -122,6 +121,11 @@ class BrainToTextDecoder_Trainer:
 
         # Call torch.compile to speed up training
         self.logger.info("Using torch.compile")
+        self.model.to(self.device) 
+        
+        if self.multi_gpu:
+            self.model = torch.nn.DataParallel(self.model)
+
         self.model = torch.compile(self.model)
 
         self.logger.info(f"Initialized RNN decoding model")
@@ -479,10 +483,7 @@ class BrainToTextDecoder_Trainer:
         Train the model 
         '''
         
-        self.model.to(self.device) 
         
-        if self.multi_gpu:
-            self.model = torch.nn.DataParallel(self.model)
                 
         train_losses = []
         val_losses = []
