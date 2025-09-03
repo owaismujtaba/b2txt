@@ -503,6 +503,144 @@ class BrainToTextDecoder_Trainer:
         '''
         Train the model 
         '''
+        train_losses = []
+        val_losses = []
+        val_PERs = []
+        val_results = []
+    
+        val_steps_since_improvement = 0
+        save_best_checkpoint = self.args.get('save_best_checkpoint', True)
+        early_stopping = self.args.get('early_stopping', True)
+        early_stopping_val_steps = self.args['early_stopping_val_steps']
+        train_start_time = time.time()
+    
+        # wrap dataloader with tqdm for progress bar
+        pbar = tqdm(enumerate(self.train_loader), total=len(self.train_loader), desc="Training")
+    
+        for i, batch in pbar:
+            self.model.train()
+            self.optimizer.zero_grad()
+            start_time = time.time() 
+    
+            # Move data to device
+            features = batch['input_features'].to(self.device)
+            labels = batch['seq_class_ids'].to(self.device)
+            n_time_steps = batch['n_time_steps'].to(self.device)
+            phone_seq_lens = batch['phone_seq_lens'].to(self.device)
+            day_indicies = batch['day_indicies'].to(self.device)
+    
+            auto_cast_device = "cuda" if self.device.type == "cuda" else "cpu"
+    
+            with torch.autocast(device_type=auto_cast_device, enabled=self.args['use_amp'], dtype=torch.bfloat16):
+                features, n_time_steps = self.transform_data(features, n_time_steps, 'train')
+                adjusted_lens = ((n_time_steps - self.args['model']['patch_size']) / self.args['model']['patch_stride'] + 1).to(torch.int32)
+                logits = self.model(features, day_indicies)
+    
+                loss = self.ctc_loss(
+                    log_probs=torch.permute(logits.log_softmax(2), [1, 0, 2]),
+                    targets=labels,
+                    input_lengths=adjusted_lens,
+                    target_lengths=phone_seq_lens
+                )
+                loss = torch.mean(loss)
+            
+            loss.backward()
+    
+            grad_norm = None
+            if self.args['grad_norm_clip_value'] > 0: 
+                grad_norm = torch.nn.utils.clip_grad_norm_(
+                    self.model.parameters(),
+                    max_norm=self.args['grad_norm_clip_value'],
+                    error_if_nonfinite=True,
+                    foreach=True
+                )
+    
+            self.optimizer.step()
+            self.learning_rate_scheduler.step()
+    
+            train_step_duration = time.time() - start_time
+            train_losses.append(loss.detach().item())
+    
+            # Logging training info
+            if i % self.args['batches_per_train_log'] == 0:
+                self.logger.info(f'Train batch {i}: loss: {loss.item():.2f} grad norm: {grad_norm:.2f} time: {train_step_duration:.3f}')
+    
+            # Incrementally run validation
+            if i % self.args['batches_per_val_step'] == 0 or i == (self.args['num_training_batches'] - 1):
+                self.logger.info(f"Running validation after training batch: {i}")
+                val_start_time = time.time()
+                val_metrics = self.validation(loader=self.val_loader, return_logits=self.args['save_val_logits'], return_data=self.args['save_val_data'])
+                val_step_duration = time.time() - val_start_time
+    
+                self.logger.info(f'Val batch {i}: PER (avg): {val_metrics["avg_PER"]:.4f}, CTC Loss (avg): {val_metrics["avg_loss"]:.4f}, time: {val_step_duration:.3f}')
+                
+                if self.args['log_individual_day_val_PER']:
+                    for day in val_metrics['day_PERs'].keys():
+                        day_data = val_metrics['day_PERs'][day]
+                        self.logger.info(f"{self.args['dataset']['sessions'][day]} val PER: {day_data['total_edit_distance'] / day_data['total_seq_length']:0.4f}")
+    
+                # Save validation metrics
+                val_PERs.append(val_metrics['avg_PER'])
+                val_losses.append(val_metrics['avg_loss'])
+                val_results.append(val_metrics)
+    
+                # Determine if this is new best
+                new_best = False
+                if val_metrics['avg_PER'] < self.best_val_PER:
+                    self.logger.info(f"New best test PER {self.best_val_PER:.4f} --> {val_metrics['avg_PER']:.4f}")
+                    self.best_val_PER = val_metrics['avg_PER']
+                    self.best_val_loss = val_metrics['avg_loss']
+                    new_best = True
+                elif val_metrics['avg_PER'] == self.best_val_PER and (val_metrics['avg_loss'] < self.best_val_loss): 
+                    self.logger.info(f"New best test loss {self.best_val_loss:.4f} --> {val_metrics['avg_loss']:.4f}")
+                    self.best_val_loss = val_metrics['avg_loss']
+                    new_best = True
+    
+                if new_best:
+                    if save_best_checkpoint:
+                        self.logger.info(f"Checkpointing model")
+                        self.save_model_checkpoint(f'{self.args["checkpoint_dir"]}/best_checkpoint', self.best_val_PER, self.best_val_loss)
+    
+                    if self.args['save_val_metrics']:
+                        with open(f'{self.args["checkpoint_dir"]}/val_metrics.pkl', 'wb') as f:
+                            pickle.dump(val_metrics, f)
+    
+                    val_steps_since_improvement = 0
+                else:
+                    val_steps_since_improvement += 1
+    
+                # Save all checkpoints if needed
+                if self.args['save_all_val_steps']:
+                    self.save_model_checkpoint(f'{self.args["checkpoint_dir"]}/checkpoint_batch_{i}', val_metrics['avg_PER'])
+    
+                # Early stopping
+                if early_stopping and (val_steps_since_improvement >= early_stopping_val_steps):
+                    self.logger.info(f'Validation PER has not improved in {early_stopping_val_steps} validation steps. Stopping training early at batch {i}')
+                    break
+    
+        # Final logs
+        training_duration = time.time() - train_start_time
+        self.logger.info(f'Best avg val PER achieved: {self.best_val_PER:.5f}')
+        self.logger.info(f'Total training time: {(training_duration / 60):.2f} minutes')
+    
+        # Save final model
+        if self.args['save_final_model']:
+            self.save_model_checkpoint(f'{self.args["checkpoint_dir"]}/final_checkpoint_batch_{i}', val_PERs[-1])
+    
+        train_stats = {
+            'train_losses': train_losses,
+            'val_losses': val_losses,
+            'val_PERs': val_PERs,
+            'val_metrics': val_results
+        }
+        return train_stats
+    
+
+    
+    def train1(self):
+        '''
+        Train the model 
+        '''
 
         # Set model to train mode (specifically to make sure dropout layers are engaged)
         self.model.train()
