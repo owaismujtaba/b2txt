@@ -663,7 +663,12 @@ class BrainToTextDecoder_Trainer:
         Train the model 
         '''
 
-        self.model.train()
+        #self.model.train()
+        if torch.cuda.device_count() > 1:
+            print(f"Using {torch.cuda.device_count()} GPUs")
+            self.model = nn.DataParallel(self.model)  # <-- key step
+        self.model.to(self.device) 
+        
         train_losses = []
         val_losses = []
         val_PERs = []
