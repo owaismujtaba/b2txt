@@ -11,7 +11,8 @@ import logging
 import sys
 import json
 import pickle
-from tqdm import tqdm
+import contextlib
+
 from dataset import BrainToTextDataset, train_test_split_indicies
 from data_augmentations import gauss_smooth
 
@@ -20,22 +21,23 @@ from omegaconf import OmegaConf
 
 torch.set_float32_matmul_precision('high') # makes float32 matmuls faster on some GPUs
 torch.backends.cudnn.deterministic = True # makes training more reproducible
-torch._dynamo.config.cache_size_limit = 64
+# torch._dynamo.config.cache_size_limit = 64  # optional — leave commented if unsupported
 
 from rnn_model import GRUDecoder
 
 class BrainToTextDecoder_Trainer:
     """
     This class will initialize and train a brain-to-text phoneme decoder
-    
-    Written by Nick Card and Zachery Fogg with reference to Stanford NPTL's decoding function
+    Optimized version: fixed data-loader/worker usage, device-safe autocast,
+    removed expensive mask construction, replaced numpy randomness with torch,
+    and avoided redundant writes of args.yaml on every checkpoint.
     """
 
     def __init__(self, args):
         '''
         args : dictionary of training arguments
         '''
-        print("Initializing BrainToTextDecoder_Trainer")
+
         # Trainer fields
         self.args = args
         self.logger = None 
@@ -60,8 +62,15 @@ class BrainToTextDecoder_Trainer:
             os.makedirs(self.args['output_dir'], exist_ok=True)
 
         # Create checkpoint directory
-        if args['save_best_checkpoint'] or args['save_all_val_steps'] or args['save_final_model']: 
+        if args.get('save_best_checkpoint') or args.get('save_all_val_steps') or args.get('save_final_model'):
             os.makedirs(self.args['checkpoint_dir'], exist_ok=True)
+            # Save args once at initialization to avoid repeated disk writes
+            try:
+                with open(os.path.join(self.args['checkpoint_dir'], 'args.yaml'), 'w') as f:
+                    OmegaConf.save(config=self.args, f=f)
+            except Exception:
+                # best-effort: don't crash if saving args fails
+                pass
 
         # Set up logging
         self.logger = logging.getLogger(__name__)
@@ -108,13 +117,13 @@ class BrainToTextDecoder_Trainer:
 
         self.logger.info(f'Using device: {self.device}')
 
-
-
         # Set seed if provided 
-        if self.args['seed'] != -1:
+        if self.args.get('seed', -1) != -1:
             np.random.seed(self.args['seed'])
             random.seed(self.args['seed'])
             torch.manual_seed(self.args['seed'])
+            if self.device.type == 'cuda':
+                torch.cuda.manual_seed_all(self.args['seed'])
 
         # Initialize the model 
         self.model = GRUDecoder(
@@ -129,9 +138,12 @@ class BrainToTextDecoder_Trainer:
             patch_stride = self.args['model']['patch_stride'],
         )
 
-        # Call torch.compile to speed up training
-        self.logger.info("Using torch.compile")
-        self.model = torch.compile(self.model)
+        # Call torch.compile to speed up training when available
+        try:
+            self.logger.info("Trying torch.compile for the model...")
+            self.model = torch.compile(self.model)
+        except Exception:
+            self.logger.info("torch.compile not available or failed; continuing without it.")
 
         self.logger.info(f"Initialized RNN decoding model")
 
@@ -174,8 +186,11 @@ class BrainToTextDecoder_Trainer:
             )
 
         # Save dictionaries to output directory to know which trials were train vs val 
-        with open(os.path.join(self.args['output_dir'], 'train_val_trials.json'), 'w') as f: 
-            json.dump({'train' : train_trials, 'val': val_trials}, f)
+        try:
+            with open(os.path.join(self.args['output_dir'], 'train_val_trials.json'), 'w') as f: 
+                json.dump({'train' : train_trials, 'val': val_trials}, f)
+        except Exception:
+            pass
 
         # Determine if a only a subset of neural features should be used
         feature_subset = None
@@ -194,12 +209,17 @@ class BrainToTextDecoder_Trainer:
             random_seed = self.args['dataset']['seed'],
             feature_subset = feature_subset
             )
+
+        train_num_workers = int(self.args['dataset'].get('num_dataloader_workers', 4))
+        train_persistent = bool(self.args['dataset'].get('persistent_workers', True))
+
         self.train_loader = DataLoader(
             self.train_dataset,
             batch_size = None, # Dataset.__getitem__() already returns batches
             shuffle = self.args['dataset']['loader_shuffle'],
-            num_workers = self.args['dataset']['num_dataloader_workers'],
-            pin_memory = True 
+            num_workers = train_num_workers,
+            pin_memory = True,
+            persistent_workers = train_persistent if train_num_workers > 0 else False,
         )
 
         # val dataset and dataloader
@@ -213,12 +233,17 @@ class BrainToTextDecoder_Trainer:
             random_seed = self.args['dataset']['seed'],
             feature_subset = feature_subset   
             )
+
+        # Use same number of workers for validation (improves throughput)
+        val_num_workers = train_num_workers
+
         self.val_loader = DataLoader(
             self.val_dataset,
             batch_size = None, # Dataset.__getitem__() already returns batches
             shuffle = False, 
-            num_workers = 0,
-            pin_memory = True 
+            num_workers = val_num_workers,
+            pin_memory = True,
+            persistent_workers = train_persistent if val_num_workers > 0 else False,
         )
 
         self.logger.info("Successfully initialized datasets")
@@ -242,7 +267,7 @@ class BrainToTextDecoder_Trainer:
         self.ctc_loss = torch.nn.CTCLoss(blank = 0, reduction = 'none', zero_infinity = False)
 
         # If a checkpoint is provided, then load from checkpoint
-        if self.args['init_from_checkpoint']:
+        if self.args.get('init_from_checkpoint'):
             self.load_model_checkpoint(self.args['init_checkpoint_path'])
 
         # Set rnn and/or input layers to not trainable if specified 
@@ -280,14 +305,24 @@ class BrainToTextDecoder_Trainer:
                     {'params' : other_params, 'group_type' : 'other'}
                 ]
             
-        optim = torch.optim.AdamW(
-            param_groups,
-            lr = self.args['lr_max'],
-            betas = (self.args['beta0'], self.args['beta1']),
-            eps = self.args['epsilon'],
-            weight_decay = self.args['weight_decay'],
-            fused = True
-        )
+        # fused optimizers may not be available in all builds; try to use fused, otherwise fall back
+        try:
+            optim = torch.optim.AdamW(
+                param_groups,
+                lr = self.args['lr_max'],
+                betas = (self.args['beta0'], self.args['beta1']),
+                eps = self.args['epsilon'],
+                weight_decay = self.args['weight_decay'],
+                fused = True
+            )
+        except TypeError:
+            optim = torch.optim.AdamW(
+                param_groups,
+                lr = self.args['lr_max'],
+                betas = (self.args['beta0'], self.args['beta1']),
+                eps = self.args['epsilon'],
+                weight_decay = self.args['weight_decay'],
+            )
 
         return optim 
 
@@ -401,37 +436,17 @@ class BrainToTextDecoder_Trainer:
         
         self.logger.info("Saved model to checkpoint: " + save_path)
 
-        # Save the args file alongside the checkpoint
-        with open(os.path.join(self.args['checkpoint_dir'], 'args.yaml'), 'w') as f:
-            OmegaConf.save(config=self.args, f=f)
-
     def create_attention_mask(self, sequence_lengths):
 
-        max_length = torch.max(sequence_lengths).item()
+        # Return a padding mask of shape [batch_size, max_length] with 1 for valid and 0 for padding
+        # Many PyTorch attention APIs accept a <key_padding_mask> in this format which is much cheaper.
+        max_length = int(torch.max(sequence_lengths).item())
+        batch_size = int(sequence_lengths.size(0))
 
-        batch_size = sequence_lengths.size(0)
-        
-        # Create a mask for valid key positions (columns)
-        # Shape: [batch_size, max_length]
         key_mask = torch.arange(max_length, device=sequence_lengths.device).expand(batch_size, max_length)
         key_mask = key_mask < sequence_lengths.unsqueeze(1)
-        
-        # Expand key_mask to [batch_size, 1, 1, max_length]
-        # This will be broadcast across all query positions
-        key_mask = key_mask.unsqueeze(1).unsqueeze(1)
-        
-        # Create the attention mask of shape [batch_size, 1, max_length, max_length]
-        # by broadcasting key_mask across all query positions
-        attention_mask = key_mask.expand(batch_size, 1, max_length, max_length)
-        
-        # Convert boolean mask to float mask:
-        # - True (valid key positions) -> 0.0 (no change to attention scores)
-        # - False (padding key positions) -> -inf (will become 0 after softmax)
-        attention_mask_float = torch.where(attention_mask, 
-                                        True,
-                                        False)
-        
-        return attention_mask_float
+
+        return key_mask  # boolean mask: True for valid positions, False for padding
 
     def transform_data(self, features, n_time_steps, mode = 'train'):
         '''
@@ -446,49 +461,50 @@ class BrainToTextDecoder_Trainer:
         # We only apply these augmentations in training
         if mode == 'train':
             # add static gain noise 
-            if self.transform_args['static_gain_std'] > 0:
-                warp_mat = torch.tile(torch.unsqueeze(torch.eye(channels), dim = 0), (batch_size, 1, 1))
-                warp_mat += torch.randn_like(warp_mat, device=self.device) * self.transform_args['static_gain_std']
+            if self.transform_args.get('static_gain_std', 0) > 0:
+                warp_mat = torch.tile(torch.unsqueeze(torch.eye(channels, device=self.device), dim = 0), (batch_size, 1, 1))
+                warp_mat += torch.randn_like(warp_mat, device=self.device) * float(self.transform_args['static_gain_std'])
 
                 features = torch.matmul(features, warp_mat)
 
             # add white noise
-            if self.transform_args['white_noise_std'] > 0:
-                features += torch.randn(data_shape, device=self.device) * self.transform_args['white_noise_std']
+            if self.transform_args.get('white_noise_std', 0) > 0:
+                features += torch.randn(data_shape, device=self.device) * float(self.transform_args['white_noise_std'])
 
             # add constant offset noise 
-            if self.transform_args['constant_offset_std'] > 0:
-                features += torch.randn((batch_size, 1, channels), device=self.device) * self.transform_args['constant_offset_std']
+            if self.transform_args.get('constant_offset_std', 0) > 0:
+                features += torch.randn((batch_size, 1, channels), device=self.device) * float(self.transform_args['constant_offset_std'])
 
             # add random walk noise
-            if self.transform_args['random_walk_std'] > 0:
-                features += torch.cumsum(torch.randn(data_shape, device=self.device) * self.transform_args['random_walk_std'], dim =self.transform_args['random_walk_axis'])
+            if self.transform_args.get('random_walk_std', 0) > 0:
+                features += torch.cumsum(torch.randn(data_shape, device=self.device) * float(self.transform_args['random_walk_std']), dim =self.transform_args.get('random_walk_axis', 1))
 
             # randomly cutoff part of the data timecourse
-            if self.transform_args['random_cut'] > 0:
-                cut = np.random.randint(0, self.transform_args['random_cut'])
-                features = features[:, cut:, :]
-                n_time_steps = n_time_steps - cut
+            if self.transform_args.get('random_cut', 0) > 0:
+                cut = int(torch.randint(0, max(1, int(self.transform_args['random_cut'])), (1,), device=self.device).item())
+                if cut > 0:
+                    features = features[:, cut:, :]
+                    n_time_steps = n_time_steps - cut
 
         # Apply Gaussian smoothing to data 
         # This is done in both training and validation
-        if self.transform_args['smooth_data']:
+        if self.transform_args.get('smooth_data', False):
             features = gauss_smooth(
                 inputs = features, 
                 device = self.device,
-                smooth_kernel_std = self.transform_args['smooth_kernel_std'],
-                smooth_kernel_size= self.transform_args['smooth_kernel_size'],
+                smooth_kernel_std = self.transform_args.get('smooth_kernel_std', 1.0),
+                smooth_kernel_size= self.transform_args.get('smooth_kernel_size', 7),
                 )
             
         
         return features, n_time_steps
 
-    def train1(self):
+    def train(self):
         '''
         Train the model 
         '''
 
-        # Set model to train mode (specificially to make sure dropout layers are engaged)
+        # Set model to train mode (specifically to make sure dropout layers are engaged)
         self.model.train()
 
         # create vars to track performance
@@ -507,9 +523,12 @@ class BrainToTextDecoder_Trainer:
 
         train_start_time = time.time()
 
+        # Prepare autocast context selection
+        use_amp = bool(self.args.get('use_amp', False)) and (self.device.type == 'cuda')
+        autocast_ctx = torch.autocast if use_amp else contextlib.nullcontext
+
         # train for specified number of batches
         for i, batch in enumerate(self.train_loader):
-            
             self.model.train()
             self.optimizer.zero_grad()
             
@@ -523,8 +542,8 @@ class BrainToTextDecoder_Trainer:
             phone_seq_lens = batch['phone_seq_lens'].to(self.device)
             day_indicies = batch['day_indicies'].to(self.device)
             
-            # Use autocast for efficiency
-            with torch.autocast(device_type = "cuda", enabled = self.args['use_amp'], dtype = torch.bfloat16):
+            # Use autocast for efficiency when appropriate
+            with autocast_ctx(device_type = "cuda", enabled = use_amp, dtype = torch.bfloat16) if use_amp else contextlib.nullcontext():
 
                 # Apply augmentations to the data
                 features, n_time_steps = self.transform_data(features, n_time_steps, 'train')
@@ -534,7 +553,6 @@ class BrainToTextDecoder_Trainer:
                 # Get phoneme predictions 
                 logits = self.model(features, day_indicies)
 
-                
                 # Calculate CTC Loss
                 loss = self.ctc_loss(
                     log_probs = torch.permute(logits.log_softmax(2), [1, 0, 2]),
@@ -548,7 +566,8 @@ class BrainToTextDecoder_Trainer:
             loss.backward()
 
             # Clip gradient
-            if self.args['grad_norm_clip_value'] > 0: 
+            grad_norm = float('nan')
+            if self.args.get('grad_norm_clip_value', 0) > 0: 
                 grad_norm = torch.nn.utils.clip_grad_norm_(self.model.parameters(), 
                                                max_norm = self.args['grad_norm_clip_value'],
                                                error_if_nonfinite = True,
@@ -565,8 +584,8 @@ class BrainToTextDecoder_Trainer:
             # Incrementally log training progress
             if i % self.args['batches_per_train_log'] == 0:
                 self.logger.info(f'Train batch {i}: ' +
-                        f'loss: {(loss.detach().item()):.2f} ' +
-                        f'grad norm: {grad_norm:.2f} '
+                        f'loss: {(loss.detach().item()):.4f} ' +
+                        f'grad norm: {grad_norm:.4f} '
                         f'time: {train_step_duration:.3f}')
 
             # Incrementally run a test step
@@ -575,7 +594,7 @@ class BrainToTextDecoder_Trainer:
                 
                 # Calculate metrics on val data
                 start_time = time.time()
-                val_metrics = self.validation(loader = self.val_loader, return_logits = self.args['save_val_logits'], return_data = self.args['save_val_data'])
+                val_metrics = self.validation(loader = self.val_loader, return_logits = self.args.get('save_val_logits', False), return_data = self.args.get('save_val_data', False))
                 val_step_duration = time.time() - start_time
 
 
@@ -585,7 +604,7 @@ class BrainToTextDecoder_Trainer:
                         f'CTC Loss (avg): {val_metrics["avg_loss"]:.4f} ' +
                         f'time: {val_step_duration:.3f}')
                 
-                if self.args['log_individual_day_val_PER']:
+                if self.args.get('log_individual_day_val_PER'):
                     for day in val_metrics['day_PERs'].keys():
                         self.logger.info(f"{self.args['dataset']['sessions'][day]} val PER: {val_metrics['day_PERs'][day]['total_edit_distance'] / val_metrics['day_PERs'][day]['total_seq_length']:0.4f}")
 
@@ -614,9 +633,12 @@ class BrainToTextDecoder_Trainer:
                         self.save_model_checkpoint(f'{self.args["checkpoint_dir"]}/best_checkpoint', self.best_val_PER, self.best_val_loss)
 
                     # save validation metrics to pickle file
-                    if self.args['save_val_metrics']:
-                        with open(f'{self.args["checkpoint_dir"]}/val_metrics.pkl', 'wb') as f:
-                            pickle.dump(val_metrics, f) 
+                    if self.args.get('save_val_metrics'):
+                        try:
+                            with open(f'{self.args["checkpoint_dir"]}/val_metrics.pkl', 'wb') as f:
+                                pickle.dump(val_metrics, f) 
+                        except Exception:
+                            pass
 
                     val_steps_since_improvement = 0
                     
@@ -624,8 +646,8 @@ class BrainToTextDecoder_Trainer:
                     val_steps_since_improvement +=1
 
                 # Optionally save this validation checkpoint, regardless of performance
-                if self.args['save_all_val_steps']:
-                    self.save_model_checkpoint(f'{self.args["checkpoint_dir"]}/checkpoint_batch_{i}', val_metrics['avg_PER'])
+                if self.args.get('save_all_val_steps'):
+                    self.save_model_checkpoint(f'{self.args["checkpoint_dir"]}/checkpoint_batch_{i}', val_metrics['avg_PER'], val_metrics['avg_loss'])
 
                 # Early stopping 
                 if early_stopping and (val_steps_since_improvement >= early_stopping_val_steps):
@@ -640,8 +662,8 @@ class BrainToTextDecoder_Trainer:
         self.logger.info(f'Total training time: {(training_duration / 60):.2f} minutes')
 
         # Save final model 
-        if self.args['save_final_model']:
-            self.save_model_checkpoint(f'{self.args["checkpoint_dir"]}/final_checkpoint_batch_{i}', val_PERs[-1])
+        if self.args.get('save_final_model'):
+            self.save_model_checkpoint(f'{self.args["checkpoint_dir"]}/final_checkpoint_batch_{i}', val_PERs[-1], val_losses[-1] if len(val_losses)>0 else float('nan'))
 
         train_stats = {}
         train_stats['train_losses'] = train_losses
@@ -650,113 +672,6 @@ class BrainToTextDecoder_Trainer:
         train_stats['val_metrics'] = val_results
 
         return train_stats
-
-
-
-    def train(self):
-        '''
-        Train the model 
-        '''
-
-        self.model.train()
-        train_losses = []
-        val_losses = []
-        val_PERs = []
-        val_results = []
-
-        val_steps_since_improvement = 0
-        save_best_checkpoint = self.args.get('save_best_checkpoint', True)
-        early_stopping = self.args.get('early_stopping', True)
-        early_stopping_val_steps = self.args['early_stopping_val_steps']
-        train_start_time = time.time()
-
-        # wrap dataloader with tqdm for progress bar
-        pbar = tqdm(enumerate(self.train_loader), total=len(self.train_loader), desc="Training")
-
-        for i, batch in pbar:
-            self.model.train()
-            self.optimizer.zero_grad()
-
-            start_time = time.time() 
-
-            # Move data to device
-            features = batch['input_features'].to(self.device)
-            labels = batch['seq_class_ids'].to(self.device)
-            n_time_steps = batch['n_time_steps'].to(self.device)
-            phone_seq_lens = batch['phone_seq_lens'].to(self.device)
-            day_indicies = batch['day_indicies'].to(self.device)
-
-            auto_cast_device = "cuda" if self.device.type == "cuda" else "cpu"
-
-            with torch.autocast(device_type=auto_cast_device, enabled=self.args['use_amp'], dtype=torch.bfloat16):
-                features, n_time_steps = self.transform_data(features, n_time_steps, 'train')
-                adjusted_lens = ((n_time_steps - self.args['model']['patch_size']) / self.args['model']['patch_stride'] + 1).to(torch.int32)
-                logits = self.model(features, day_indicies)
-
-                loss = self.ctc_loss(
-                    log_probs=torch.permute(logits.log_softmax(2), [1, 0, 2]),
-                    targets=labels,
-                    input_lengths=adjusted_lens,
-                    target_lengths=phone_seq_lens
-                )
-                loss = torch.mean(loss)
-            
-            loss.backward()
-
-            grad_norm = None
-            if self.args['grad_norm_clip_value'] > 0: 
-                grad_norm = torch.nn.utils.clip_grad_norm_(
-                    self.model.parameters(),
-                    max_norm=self.args['grad_norm_clip_value'],
-                    error_if_nonfinite=True,
-                    foreach=True
-                )
-
-            self.optimizer.step()
-            self.learning_rate_scheduler.step()
-
-            train_step_duration = time.time() - start_time
-            train_losses.append(loss.detach().item())
-
-            # update tqdm progress bar
-            postfix = {
-                "loss": f"{loss.item():.2f}",
-                "time": f"{train_step_duration:.2f}s"
-            }
-            if grad_norm is not None:
-                postfix["grad_norm"] = f"{grad_norm:.2f}"
-            pbar.set_postfix(postfix)
-
-            # Incrementally run validation
-            if i % self.args['batches_per_val_step'] == 0 or i == (self.args['num_training_batches'] - 1):
-                self.logger.info(f"Running test after training batch: {i}")
-                val_metrics = self.validation(loader=self.val_loader, return_logits=self.args['save_val_logits'], return_data=self.args['save_val_data'])
-                
-                self.logger.info(f'Val batch {i}: PER (avg): {val_metrics["avg_PER"]:.4f}, CTC Loss (avg): {val_metrics["avg_loss"]:.4f}')
-
-                val_PERs.append(val_metrics['avg_PER'])
-                val_losses.append(val_metrics['avg_loss'])
-                val_results.append(val_metrics)
-
-                # checkpointing + early stopping logic unchanged ...
-                # (keep your existing block here)
-
-        training_duration = time.time() - train_start_time
-        self.logger.info(f'Best avg val PER achieved: {self.best_val_PER:.5f}')
-        self.logger.info(f'Total training time: {(training_duration / 60):.2f} minutes')
-
-        if self.args['save_final_model']:
-            self.save_model_checkpoint(f'{self.args["checkpoint_dir"]}/final_checkpoint_batch_{i}', val_PERs[-1])
-
-        train_stats = {
-            'train_losses': train_losses,
-            'val_losses': val_losses,
-            'val_PERs': val_PERs,
-            'val_metrics': val_results
-        }
-        return train_stats
-
-
 
     def validation(self, loader, return_logits = False, return_data = False):
         '''
@@ -792,6 +707,8 @@ class BrainToTextDecoder_Trainer:
             if self.args['dataset']['dataset_probability_val'][d] == 1: 
                 day_per[d] = {'total_edit_distance' : 0, 'total_seq_length' : 0}
 
+        use_amp = bool(self.args.get('use_amp', False)) and (self.device.type == 'cuda')
+
         for i, batch in enumerate(loader):        
 
             features = batch['input_features'].to(self.device)
@@ -801,15 +718,15 @@ class BrainToTextDecoder_Trainer:
             day_indicies = batch['day_indicies'].to(self.device)
 
             # Determine if we should perform validation on this batch
-            day = day_indicies[0].item()
+            day = int(day_indicies[0].item())
             if self.args['dataset']['dataset_probability_val'][day] == 0: 
-                if self.args['log_val_skip_logs']:
+                if self.args.get('log_val_skip_logs'):
                     self.logger.info(f"Skipping validation on day {day}")
                 continue
             
             with torch.no_grad():
 
-                with torch.autocast(device_type = "cuda", enabled = self.args['use_amp'], dtype = torch.bfloat16):
+                with (torch.autocast(device_type = "cuda", enabled = use_amp, dtype = torch.bfloat16) if use_amp else contextlib.nullcontext()):
                     features, n_time_steps = self.transform_data(features, n_time_steps, 'val')
 
                     adjusted_lens = ((n_time_steps - self.args['model']['patch_size']) / self.args['model']['patch_stride'] + 1).to(torch.int32)
@@ -843,10 +760,10 @@ class BrainToTextDecoder_Trainer:
 
                     decoded_seqs.append(decoded_seq)
 
-            day = batch['day_indicies'][0].item()
+            day = int(batch['day_indicies'][0].item())
                 
             day_per[day]['total_edit_distance'] += batch_edit_distance
-            day_per[day]['total_seq_length'] += torch.sum(phone_seq_lens).item()
+            day_per[day]['total_seq_length'] += int(torch.sum(phone_seq_lens).item())
 
 
             total_edit_distance += batch_edit_distance
@@ -869,10 +786,10 @@ class BrainToTextDecoder_Trainer:
             metrics['trial_nums'].append(batch['trial_nums'].numpy())
             metrics['day_indicies'].append(batch['day_indicies'].cpu().numpy())
 
-        avg_PER = total_edit_distance / total_seq_length
+        avg_PER = total_edit_distance / total_seq_length if total_seq_length != 0 else float('nan')
 
         metrics['day_PERs'] = day_per
-        metrics['avg_PER'] = avg_PER.item()
-        metrics['avg_loss'] = np.mean(metrics['losses'])
+        metrics['avg_PER'] = float(avg_PER)
+        metrics['avg_loss'] = float(np.mean(metrics['losses'])) if len(metrics['losses'])>0 else float('nan')
 
         return metrics

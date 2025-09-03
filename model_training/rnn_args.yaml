@@ -70,18 +70,18 @@ dataset:
     smooth_kernel_std: 2 # standard deviation of the smoothing kernel applied to the data
 
   neural_dim: 512 # dimensionality of the neural data
-  batch_size: 64 # batch size for training
+  batch_size: 128 # batch size for training
   n_classes: 41 # number of classes (phonemes) in the dataset
   max_seq_elements: 500 # maximum number of sequence elements (phonemes) for any trial
   days_per_batch: 4 # number of randomly-selected days to include in each batch
   seed: 1 # random seed for reproducibility
-  num_dataloader_workers: 1 # number of workers for the data loader
+  num_dataloader_workers: 8 # number of workers for the data loader
   loader_shuffle: false # whether to shuffle the data loader
   must_include_days: null # specific days to include in the dataset
   test_percentage: 0.1 # percentage of data to use for testing
   feature_subset: null # specific features to include in the dataset
 
-  dataset_dir: '/home/owais/Desktop/work/nejm-brain-to-text/data/hdf5_data_final' # directory containing the dataset
+  dataset_dir: '/home/owaismujtaba/work/b2txt/data/raw/hdf5_data_final' # directory containing the dataset
   bad_trials_dict: null # dictionary of bad trials to exclude from the dataset
   sessions: # list of sessions to include in the dataset
   - t15.2023.08.11
