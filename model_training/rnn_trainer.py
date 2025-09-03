@@ -47,6 +47,7 @@ class BrainToTextDecoder_Trainer:
 
         self.best_val_PER = torch.inf # track best PER for checkpointing
         self.best_val_loss = torch.inf # track best loss for checkpointing
+        self.multi_gpu = False  # Initialize multi_gpu flag
 
         self.train_dataset = None 
         self.val_dataset = None 
