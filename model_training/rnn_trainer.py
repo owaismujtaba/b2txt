@@ -490,6 +490,11 @@ class BrainToTextDecoder_Trainer:
 
         # Set model to train mode (specificially to make sure dropout layers are engaged)
         self.model.train()
+        
+        if torch.cuda.device_count() > 1:
+            print(f"Using {torch.cuda.device_count()} GPUs")
+            self.model = nn.DataParallel(self.model)  # <-- key step
+        self.model.to(self.device) 
 
         # create vars to track performance
         train_losses = []
