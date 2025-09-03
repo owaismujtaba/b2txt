@@ -84,17 +84,17 @@ class BrainToTextDecoder_Trainer:
 
         # Configure device pytorch will use 
         if torch.cuda.is_available():
+            self.device = torch.device("cuda:0")
             print('GPU Available')
             num_gpus = torch.cuda.device_count()
             if num_gpus > 1:
                 print('Good Multiple GPU')
-                device = torch.device("cuda:0")  # main device
                 self.multi_gpu = True
             else:
-                device = torch.device("cuda:0")
+                
                 self.multi_gpu = False
         else:
-            device = torch.device("cpu")
+            self.device = torch.device("cpu")
             self.multi_gpu = False
         
         self.logger.info(f'Using device: {self.device}')
