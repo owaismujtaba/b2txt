@@ -478,7 +478,7 @@ class BrainToTextDecoder_Trainer:
         
         self.model.to(self.device) 
         
-        if multi_gpu:
+        if self.multi_gpu:
             model = torch.nn.DataParallel(model)
                 
         train_losses = []
