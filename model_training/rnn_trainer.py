@@ -83,31 +83,19 @@ class BrainToTextDecoder_Trainer:
 
         # Configure device pytorch will use 
         if torch.cuda.is_available():
-            gpu_num = self.args.get('gpu_number', 0)
-            try:
-                gpu_num = int(gpu_num)
-            except ValueError:
-                self.logger.warning(f"Invalid gpu_number value: {gpu_num}. Using 0 instead.")
-                gpu_num = 0
-
-            max_gpu_index = torch.cuda.device_count() - 1
-            if gpu_num > max_gpu_index:
-                self.logger.warning(f"Requested GPU {gpu_num} not available. Using GPU 0 instead.")
-                gpu_num = 0
-
-            try:
-                self.device = torch.device(f"cuda:{gpu_num}")
-                test_tensor = torch.tensor([1.0]).to(self.device)
-                test_tensor = test_tensor * 2
-            except Exception as e:
-                self.logger.error(f"Error initializing CUDA device {gpu_num}: {str(e)}")
-                self.logger.info("Falling back to CPU")
-                self.device = torch.device("cpu")
+            num_gpus = torch.cuda.device_count()
+            if num_gpus > 1:
+                device = torch.device("cuda:0")  # main device
+                self.multi_gpu = True
+            else:
+                device = torch.device("cuda:0")
+                self.multi_gpu = False
         else:
-            self.device = torch.device("cpu")
-
+            device = torch.device("cpu")
+            self.multi_gpu = False
+        
         self.logger.info(f'Using device: {self.device}')
-
+        
 
 
         # Set seed if provided 
@@ -483,192 +471,16 @@ class BrainToTextDecoder_Trainer:
         
         return features, n_time_steps
 
-    def train1(self):
-        '''
-        Train the model 
-        '''
-
-        # Set model to train mode (specificially to make sure dropout layers are engaged)
-        self.model.train()
-        
-        if torch.cuda.device_count() > 1:
-            print(f"Using {torch.cuda.device_count()} GPUs")
-            self.model = nn.DataParallel(self.model)  # <-- key step
-        self.model.to(self.device) 
-
-        # create vars to track performance
-        train_losses = []
-        val_losses = []
-        val_PERs = []
-        val_results = []
-
-        val_steps_since_improvement = 0
-
-        # training params 
-        save_best_checkpoint = self.args.get('save_best_checkpoint', True)
-        early_stopping = self.args.get('early_stopping', True)
-
-        early_stopping_val_steps = self.args['early_stopping_val_steps']
-
-        train_start_time = time.time()
-
-        # train for specified number of batches
-        for i, batch in enumerate(self.train_loader):
-            
-            self.model.train()
-            self.optimizer.zero_grad()
-            
-            # Train step
-            start_time = time.time() 
-
-            # Move data to device
-            features = batch['input_features'].to(self.device)
-            labels = batch['seq_class_ids'].to(self.device)
-            n_time_steps = batch['n_time_steps'].to(self.device)
-            phone_seq_lens = batch['phone_seq_lens'].to(self.device)
-            day_indicies = batch['day_indicies'].to(self.device)
-            
-            # Use autocast for efficiency
-            with torch.autocast(device_type = "cuda", enabled = self.args['use_amp'], dtype = torch.bfloat16):
-
-                # Apply augmentations to the data
-                features, n_time_steps = self.transform_data(features, n_time_steps, 'train')
-
-                adjusted_lens = ((n_time_steps - self.args['model']['patch_size']) / self.args['model']['patch_stride'] + 1).to(torch.int32)
-
-                # Get phoneme predictions 
-                logits = self.model(features, day_indicies)
-
-                
-                # Calculate CTC Loss
-                loss = self.ctc_loss(
-                    log_probs = torch.permute(logits.log_softmax(2), [1, 0, 2]),
-                    targets = labels,
-                    input_lengths = adjusted_lens,
-                    target_lengths = phone_seq_lens
-                    )
-                    
-                loss = torch.mean(loss) # take mean loss over batches
-            
-            loss.backward()
-
-            # Clip gradient
-            if self.args['grad_norm_clip_value'] > 0: 
-                grad_norm = torch.nn.utils.clip_grad_norm_(self.model.parameters(), 
-                                               max_norm = self.args['grad_norm_clip_value'],
-                                               error_if_nonfinite = True,
-                                               foreach = True
-                                               )
-
-            self.optimizer.step()
-            self.learning_rate_scheduler.step()
-            
-            # Save training metrics 
-            train_step_duration = time.time() - start_time
-            train_losses.append(loss.detach().item())
-
-            # Incrementally log training progress
-            if i % self.args['batches_per_train_log'] == 0:
-                self.logger.info(f'Train batch {i}: ' +
-                        f'loss: {(loss.detach().item()):.2f} ' +
-                        f'grad norm: {grad_norm:.2f} '
-                        f'time: {train_step_duration:.3f}')
-
-            # Incrementally run a test step
-            if i % self.args['batches_per_val_step'] == 0 or i == ((self.args['num_training_batches'] - 1)):
-                self.logger.info(f"Running test after training batch: {i}")
-                
-                # Calculate metrics on val data
-                start_time = time.time()
-                val_metrics = self.validation(loader = self.val_loader, return_logits = self.args['save_val_logits'], return_data = self.args['save_val_data'])
-                val_step_duration = time.time() - start_time
-
-
-                # Log info 
-                self.logger.info(f'Val batch {i}: ' +
-                        f'PER (avg): {val_metrics["avg_PER"]:.4f} ' +
-                        f'CTC Loss (avg): {val_metrics["avg_loss"]:.4f} ' +
-                        f'time: {val_step_duration:.3f}')
-                
-                if self.args['log_individual_day_val_PER']:
-                    for day in val_metrics['day_PERs'].keys():
-                        self.logger.info(f"{self.args['dataset']['sessions'][day]} val PER: {val_metrics['day_PERs'][day]['total_edit_distance'] / val_metrics['day_PERs'][day]['total_seq_length']:0.4f}")
-
-                # Save metrics 
-                val_PERs.append(val_metrics['avg_PER'])
-                val_losses.append(val_metrics['avg_loss'])
-                val_results.append(val_metrics)
-
-                # Determine if new best day. Based on if PER is lower, or in the case of a PER tie, if loss is lower
-                new_best = False
-                if val_metrics['avg_PER'] < self.best_val_PER:
-                    self.logger.info(f"New best test PER {self.best_val_PER:.4f} --> {val_metrics['avg_PER']:.4f}")
-                    self.best_val_PER = val_metrics['avg_PER']
-                    self.best_val_loss = val_metrics['avg_loss']
-                    new_best = True
-                elif val_metrics['avg_PER'] == self.best_val_PER and (val_metrics['avg_loss'] < self.best_val_loss): 
-                    self.logger.info(f"New best test loss {self.best_val_loss:.4f} --> {val_metrics['avg_loss']:.4f}")
-                    self.best_val_loss = val_metrics['avg_loss']
-                    new_best = True
-
-                if new_best:
-
-                    # Checkpoint if metrics have improved 
-                    if save_best_checkpoint:
-                        self.logger.info(f"Checkpointing model")
-                        self.save_model_checkpoint(f'{self.args["checkpoint_dir"]}/best_checkpoint', self.best_val_PER, self.best_val_loss)
-
-                    # save validation metrics to pickle file
-                    if self.args['save_val_metrics']:
-                        with open(f'{self.args["checkpoint_dir"]}/val_metrics.pkl', 'wb') as f:
-                            pickle.dump(val_metrics, f) 
-
-                    val_steps_since_improvement = 0
-                    
-                else:
-                    val_steps_since_improvement +=1
-
-                # Optionally save this validation checkpoint, regardless of performance
-                if self.args['save_all_val_steps']:
-                    self.save_model_checkpoint(f'{self.args["checkpoint_dir"]}/checkpoint_batch_{i}', val_metrics['avg_PER'])
-
-                # Early stopping 
-                if early_stopping and (val_steps_since_improvement >= early_stopping_val_steps):
-                    self.logger.info(f'Overall validation PER has not improved in {early_stopping_val_steps} validation steps. Stopping training early at batch: {i}')
-                    break
-                
-        # Log final training steps 
-        training_duration = time.time() - train_start_time
-
-
-        self.logger.info(f'Best avg val PER achieved: {self.best_val_PER:.5f}')
-        self.logger.info(f'Total training time: {(training_duration / 60):.2f} minutes')
-
-        # Save final model 
-        if self.args['save_final_model']:
-            self.save_model_checkpoint(f'{self.args["checkpoint_dir"]}/final_checkpoint_batch_{i}', val_PERs[-1])
-
-        train_stats = {}
-        train_stats['train_losses'] = train_losses
-        train_stats['val_losses'] = val_losses 
-        train_stats['val_PERs'] = val_PERs
-        train_stats['val_metrics'] = val_results
-
-        return train_stats
-
-
-
     def train(self):
         '''
         Train the model 
         '''
-
-        #self.model.train()
-        if torch.cuda.device_count() > 1:
-            print(f"Using {torch.cuda.device_count()} GPUs")
-            self.model = nn.DataParallel(self.model)  # <-- key step
+        
         self.model.to(self.device) 
         
+        if multi_gpu:
+            model = torch.nn.DataParallel(model)
+                
         train_losses = []
         val_losses = []
         val_PERs = []
