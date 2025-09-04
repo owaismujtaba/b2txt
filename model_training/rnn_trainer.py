@@ -553,19 +553,75 @@ class BrainToTextDecoder_Trainer:
                 postfix["grad_norm"] = f"{grad_norm:.2f}"
             pbar.set_postfix(postfix)
 
-            # Incrementally run validation
-            if i % self.args['batches_per_val_step'] == 0 or i == (self.args['num_training_batches'] - 1):
-                self.logger.info(f"Running test after training batch: {i}")
-                val_metrics = self.validation(loader=self.val_loader, return_logits=self.args['save_val_logits'], return_data=self.args['save_val_data'])
-                
-                self.logger.info(f'Val batch {i}: PER (avg): {val_metrics["avg_PER"]:.4f}, CTC Loss (avg): {val_metrics["avg_loss"]:.4f}')
+            # Incrementally log training progress
+            if i % self.args['batches_per_train_log'] == 0:
+                self.logger.info(f'Train batch {i}: ' +
+                        f'loss: {(loss.detach().item()):.2f} ' +
+                        f'grad norm: {grad_norm:.2f} '
+                        f'time: {train_step_duration:.3f}')
 
+            # Incrementally run a test step
+            if i % self.args['batches_per_val_step'] == 0 or i == ((self.args['num_training_batches'] - 1)):
+                self.logger.info(f"Running test after training batch: {i}")
+                
+                # Calculate metrics on val data
+                start_time = time.time()
+                val_metrics = self.validation(loader = self.val_loader, return_logits = self.args['save_val_logits'], return_data = self.args['save_val_data'])
+                val_step_duration = time.time() - start_time
+
+
+                # Log info 
+                self.logger.info(f'Val batch {i}: ' +
+                        f'PER (avg): {val_metrics["avg_PER"]:.4f} ' +
+                        f'CTC Loss (avg): {val_metrics["avg_loss"]:.4f} ' +
+                        f'time: {val_step_duration:.3f}')
+                
+                if self.args['log_individual_day_val_PER']:
+                    for day in val_metrics['day_PERs'].keys():
+                        self.logger.info(f"{self.args['dataset']['sessions'][day]} val PER: {val_metrics['day_PERs'][day]['total_edit_distance'] / val_metrics['day_PERs'][day]['total_seq_length']:0.4f}")
+
+                # Save metrics 
                 val_PERs.append(val_metrics['avg_PER'])
                 val_losses.append(val_metrics['avg_loss'])
                 val_results.append(val_metrics)
 
-                # checkpointing + early stopping logic unchanged ...
-                # (keep your existing block here)
+                # Determine if new best day. Based on if PER is lower, or in the case of a PER tie, if loss is lower
+                new_best = False
+                if val_metrics['avg_PER'] < self.best_val_PER:
+                    self.logger.info(f"New best test PER {self.best_val_PER:.4f} --> {val_metrics['avg_PER']:.4f}")
+                    self.best_val_PER = val_metrics['avg_PER']
+                    self.best_val_loss = val_metrics['avg_loss']
+                    new_best = True
+                elif val_metrics['avg_PER'] == self.best_val_PER and (val_metrics['avg_loss'] < self.best_val_loss): 
+                    self.logger.info(f"New best test loss {self.best_val_loss:.4f} --> {val_metrics['avg_loss']:.4f}")
+                    self.best_val_loss = val_metrics['avg_loss']
+                    new_best = True
+
+                if new_best:
+
+                    # Checkpoint if metrics have improved 
+                    if save_best_checkpoint:
+                        self.logger.info(f"Checkpointing model")
+                        self.save_model_checkpoint(f'{self.args["checkpoint_dir"]}/best_checkpoint', self.best_val_PER, self.best_val_loss)
+
+                    # save validation metrics to pickle file
+                    if self.args['save_val_metrics']:
+                        with open(f'{self.args["checkpoint_dir"]}/val_metrics.pkl', 'wb') as f:
+                            pickle.dump(val_metrics, f) 
+
+                    val_steps_since_improvement = 0
+                    
+                else:
+                    val_steps_since_improvement +=1
+
+                # Optionally save this validation checkpoint, regardless of performance
+                if self.args['save_all_val_steps']:
+                    self.save_model_checkpoint(f'{self.args["checkpoint_dir"]}/checkpoint_batch_{i}', val_metrics['avg_PER'])
+
+                # Early stopping 
+                if early_stopping and (val_steps_since_improvement >= early_stopping_val_steps):
+                    self.logger.info(f'Overall validation PER has not improved in {early_stopping_val_steps} validation steps. Stopping training early at batch: {i}')
+                    break
 
         training_duration = time.time() - train_start_time
         self.logger.info(f'Best avg val PER achieved: {self.best_val_PER:.5f}')
