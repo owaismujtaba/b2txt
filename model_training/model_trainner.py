@@ -23,7 +23,7 @@ torch.set_float32_matmul_precision('high') # makes float32 matmuls faster on som
 torch.backends.cudnn.deterministic = True # makes training more reproducible
 # torch._dynamo.config.cache_size_limit = 64  # optional — leave commented if unsupported
 
-from rnn_model import GRUDecoder
+from rnn_model import GRUDecoder, GRUDecoderAttention
 
 class BrainToTextDecoder_Trainer:
     """
@@ -126,7 +126,7 @@ class BrainToTextDecoder_Trainer:
                 torch.cuda.manual_seed_all(self.args['seed'])
 
         # Initialize the model 
-        self.model = GRUDecoder(
+        self.model = GRUDecoderAttention(
             neural_dim = self.args['model']['n_input_features'],
             n_units = self.args['model']['n_units'],
             n_days = len(self.args['dataset']['sessions']),
