@@ -41,6 +41,6 @@ def load(file_: Union[str, pathlib.Path, IO[Any]]) -> Union[DictConfig, ListConf
             ret = OmegaConf.create(obj)
         return ret
 
-args = OmegaConf.load('model_training/rnn_args.yaml')
+args = load('model_training/rnn_args.yaml')
 trainer = BrainToTextDecoder_Trainer(args)
 metrics = trainer.train()
