@@ -57,7 +57,7 @@ from dataset import BrainToTextDataset, train_test_split_indicies
 from data_augmentations import gauss_smooth
 
 #import torchaudio.functional as F # for edit distance
-from omegaconf import OmegaConf
+'''from omegaconf import OmegaConf'''
 
 torch.set_float32_matmul_precision('high') # makes float32 matmuls faster on some GPUs
 torch.backends.cudnn.deterministic = True # makes training more reproducible
