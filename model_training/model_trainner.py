@@ -12,11 +12,12 @@ import sys
 import json
 import pickle
 import contextlib
+import editdistance
 
 from dataset import BrainToTextDataset, train_test_split_indicies
 from data_augmentations import gauss_smooth
 
-import torchaudio.functional as F # for edit distance
+#import torchaudio.functional as F # for edit distance
 from omegaconf import OmegaConf
 
 torch.set_float32_matmul_precision('high') # makes float32 matmuls faster on some GPUs
@@ -894,7 +895,8 @@ class BrainToTextDecoder_Trainer:
                         labels[iterIdx][0 : phone_seq_lens[iterIdx]].cpu().detach()
                     )
             
-                    batch_edit_distance += F.edit_distance(decoded_seq, trueSeq)
+                    '''batch_edit_distance += F.edit_distance(decoded_seq, trueSeq)'''
+                    batch_edit_distance += editdistance.eval(decoded_seq, trueSeq)
 
                     decoded_seqs.append(decoded_seq)
 
