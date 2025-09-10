@@ -16,7 +16,7 @@ from dataset import BrainToTextDataset, train_test_split_indicies
 from data_augmentations import gauss_smooth
 
 import torchaudio.functional as F # for edit distance
-from omegaconf import OmegaConf
+
 
 torch.set_float32_matmul_precision('high') # makes float32 matmuls faster on some GPUs
 torch.backends.cudnn.deterministic = True # makes training more reproducible
@@ -397,8 +397,10 @@ class BrainToTextDecoder_Trainer:
         self.logger.info("Saved model to checkpoint: " + save_path)
 
         # Save the args file alongside the checkpoint
+        '''
         with open(os.path.join(self.args['checkpoint_dir'], 'args.yaml'), 'w') as f:
             OmegaConf.save(config=self.args, f=f)
+        '''
 
     def create_attention_mask(self, sequence_lengths):
 
