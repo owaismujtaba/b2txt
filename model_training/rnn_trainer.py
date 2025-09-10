@@ -516,7 +516,7 @@ class BrainToTextDecoder_Trainer:
 
             auto_cast_device = "cuda" if self.device.type == "cuda" else "cpu"
 
-            with torch.autocast(device_type=auto_cast_device, enabled=self.args['use_amp'], dtype=torch.bfloat16):
+            with torch.autocast(device_type=auto_cast_device, enabled=True):
                 features, n_time_steps = self.transform_data(features, n_time_steps, 'train')
                 adjusted_lens = ((n_time_steps - self.args['model']['patch_size']) / self.args['model']['patch_stride'] + 1).to(torch.int32)
                 logits = self.model(features, day_indicies)
@@ -693,7 +693,7 @@ class BrainToTextDecoder_Trainer:
             
             with torch.no_grad():
 
-                with torch.autocast(device_type = "cuda", enabled = self.args['use_amp'], dtype = torch.bfloat16):
+                with torch.autocast(device_type = "cuda", enabled = True):
                     features, n_time_steps = self.transform_data(features, n_time_steps, 'val')
 
                     adjusted_lens = ((n_time_steps - self.args['model']['patch_size']) / self.args['model']['patch_stride'] + 1).to(torch.int32)
