@@ -147,8 +147,7 @@ class BrainToTextDecoder_Trainer:
         # Create datasets and dataloaders
         train_file_paths = [os.path.join(self.args["dataset"]["dataset_dir"],s,'data_train.hdf5') for s in self.args['dataset']['sessions']]
         val_file_paths = [os.path.join(self.args["dataset"]["dataset_dir"],s,'data_val.hdf5') for s in self.args['dataset']['sessions']]
-        import pdb
-        pdb.set_trace()
+        
         # Ensure that there are no duplicate days
         if len(set(train_file_paths)) != len(train_file_paths):
             raise ValueError("There are duplicate sessions listed in the train dataset")
