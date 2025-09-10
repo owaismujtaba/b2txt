@@ -2,7 +2,7 @@
 from rnn_trainer import BrainToTextDecoder_Trainer
 import yaml
 
-with open('workspace/work/b2txt/model_training/rnn_args.yaml', 'r') as file:
+with open('/workspace/work/b2txt/model_training/rnn_args.yaml', 'r') as file:
     args = yaml.safe_load(file)
 
 
