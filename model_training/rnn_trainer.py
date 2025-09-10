@@ -379,7 +379,7 @@ class BrainToTextDecoder_Trainer:
 
         self.logger.info("Loaded model from checkpoint: " + load_path)
 
-    def save_model_checkpoint(self, save_path, PER, loss):
+    def save_model_checkpoint(self, save_path, PER, loss=''):
         '''
         Save a training checkpoint
         '''
@@ -604,7 +604,11 @@ class BrainToTextDecoder_Trainer:
                     # Checkpoint if metrics have improved 
                     if save_best_checkpoint:
                         self.logger.info(f"Checkpointing model")
-                        self.save_model_checkpoint(f'{self.args["checkpoint_dir"]}/best_checkpoint', self.best_val_PER, self.best_val_loss)
+                        self.save_model_checkpoint(
+                            save_path=f'{self.args["checkpoint_dir"]}/best_checkpoint', 
+                            PER=self.best_val_PER, 
+                            loss=self.best_val_loss
+                        )
 
                     # save validation metrics to pickle file
                     if self.args['save_val_metrics']:
@@ -618,7 +622,10 @@ class BrainToTextDecoder_Trainer:
 
                 # Optionally save this validation checkpoint, regardless of performance
                 if self.args['save_all_val_steps']:
-                    self.save_model_checkpoint(f'{self.args["checkpoint_dir"]}/checkpoint_batch_{i}', val_metrics['avg_PER'])
+                    self.save_model_checkpoint(
+                        save_path=f'{self.args["checkpoint_dir"]}/checkpoint_batch_{i}', 
+                        PER=val_metrics['avg_PER']
+                    )
 
                 # Early stopping 
                 if early_stopping and (val_steps_since_improvement >= early_stopping_val_steps):
@@ -675,7 +682,7 @@ class BrainToTextDecoder_Trainer:
         for d in range(len(self.args['dataset']['sessions'])):
             if self.args['dataset']['dataset_probability_val'][d] == 1: 
                 day_per[d] = {'total_edit_distance' : 0, 'total_seq_length' : 0}
-
+        pbar = tqdm(enumerate(loader), total=len(loader), desc="Training")
         for i, batch in enumerate(loader):        
 
             features = batch['input_features'].to(self.device)
@@ -752,6 +759,11 @@ class BrainToTextDecoder_Trainer:
             metrics['block_nums'].append(batch['block_nums'].numpy())
             metrics['trial_nums'].append(batch['trial_nums'].numpy())
             metrics['day_indicies'].append(batch['day_indicies'].cpu().numpy())
+
+            postfix = {
+                "loss": f"{loss.item():.2f}"}
+            
+            pbar.set_postfix(postfix)
 
         avg_PER = total_edit_distance / total_seq_length
 
