@@ -23,10 +23,10 @@ checkpoint_dir: trained_models/baseline_rnn/checkpoint # directory to save check
 init_from_checkpoint: false # whether to initialize the model from a checkpoint
 init_checkpoint_path: None # path to the checkpoint to initialize the model from, if any
 save_best_checkpoint: true # whether to save the best checkpoint based on validation metrics
-save_all_val_steps: false # whether to save checkpoints at all validation steps
+save_all_val_steps: True # whether to save checkpoints at all validation steps
 save_final_model: false # whether to save the final model after training
-save_val_metrics: true # whether to save validation metrics during training
-early_stopping: false # whether to use early stopping based on validation metrics
+save_val_metrics: True # whether to save validation metrics during training
+early_stopping: True # whether to use early stopping based on validation metrics
 early_stopping_val_steps: 20 # number of validation steps to wait before stopping training if no improvement is seen
 
 num_training_batches: 120000 # number of training batches to run
