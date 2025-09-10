@@ -682,7 +682,8 @@ class BrainToTextDecoder_Trainer:
         for d in range(len(self.args['dataset']['sessions'])):
             if self.args['dataset']['dataset_probability_val'][d] == 1: 
                 day_per[d] = {'total_edit_distance' : 0, 'total_seq_length' : 0}
-        pbar = tqdm(enumerate(loader), total=len(loader), desc="Training")
+
+        pbar = tqdm(enumerate(loader), total=len(loader), desc="Validation")
         for i, batch in enumerate(loader):        
 
             features = batch['input_features'].to(self.device)
