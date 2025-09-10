@@ -126,7 +126,7 @@ class BrainToTextDecoder_Trainer:
         if self.multi_gpu:
             self.model = torch.nn.DataParallel(self.model)
 
-        self.model = torch.compile(self.model)
+        #self.model = torch.compile(self.model)
 
         self.logger.info(f"Initialized RNN decoding model")
 
