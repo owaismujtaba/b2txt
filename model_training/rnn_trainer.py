@@ -297,7 +297,7 @@ class BrainToTextDecoder_Trainer:
         Apply various augmentations and smoothing to data
         Performing augmentations is much faster on GPU than CPU
         '''
-
+        self.transform_args = self.args['dataset']['data_transforms']
         data_shape = features.shape
         batch_size = data_shape[0]
         channels = data_shape[-1]
