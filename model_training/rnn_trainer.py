@@ -361,6 +361,9 @@ class BrainToTextDecoder_Trainer:
         ''' 
         Load a training checkpoint
         '''
+
+        import pdb
+        pdb.set_trace()
         checkpoint = torch.load(load_path, weights_only = False) # checkpoint is just a dict
 
         self.model.load_state_dict(checkpoint['model_state_dict'])

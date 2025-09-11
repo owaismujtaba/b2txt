@@ -20,8 +20,8 @@ use_amp: true # whether to use automatic mixed precision (AMP) for training
 
 output_dir: trained_models/baseline_rnn # directory to save the trained model and logs
 checkpoint_dir: trained_models/baseline_rnn/checkpoint # directory to save checkpoints during training
-init_from_checkpoint: false # whether to initialize the model from a checkpoint
-init_checkpoint_path: None # path to the checkpoint to initialize the model from, if any
+init_from_checkpoint: True # whether to initialize the model from a checkpoint
+init_checkpoint_path:  trained_models/baseline_rnn/checkpoint/checkpoint_batch_6000 # path to the checkpoint to initialize the model from, if any
 save_best_checkpoint: true # whether to save the best checkpoint based on validation metrics
 save_all_val_steps: True # whether to save checkpoints at all validation steps
 save_final_model: false # whether to save the final model after training
