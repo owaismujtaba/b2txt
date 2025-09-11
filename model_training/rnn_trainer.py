@@ -20,6 +20,8 @@ import numpy as np
 # ----------------------------
 # Import your dataset and model
 # ----------------------------
+import pdb
+
 from dataset import BrainToTextDataset, train_test_split_indicies
 from data_augmentations import gauss_smooth
 from rnn_model import GRUDecoderAttention
@@ -356,9 +358,9 @@ class BrainToTextDecoder_Trainer:
             running_loss = 0.0
             
             # Wrap train_loader with tqdm
-            loop = tqdm(enumerate(self.train_loader), total=len(self.train_loader), desc=f"Epoch {epoch+1}/{self.args['dataset']['num_epochs']}")
-            
-            for i, batch in loop:
+            pbar = tqdm(enumerate(self.train_loader), total=len(self.train_loader), desc="TRAINING")
+            pdb.set_trace()
+            for i, batch in pbar:
                 features = batch['input_features'].to(self.device)
                 labels = batch['seq_class_ids'].to(self.device)
                 n_time_steps = batch['n_time_steps'].to(self.device)
@@ -380,7 +382,7 @@ class BrainToTextDecoder_Trainer:
                 running_loss += loss.item()
                 
                 # Update tqdm postfix with current loss and average loss
-                loop.set_postfix({
+                pbar.set_postfix({
                     'Batch Loss': f'{loss.item():.4f}',
                     'Avg Loss': f'{running_loss / (i+1):.4f}'
                 })
