@@ -429,6 +429,7 @@ class BrainToTextDecoder_Trainer:
         
         avg_PER = total_edit_distance / total_seq_length
         self.logger.info(f" avg_per: {avg_PER}")
+        self.logger.info(day_per)
         return {'avg_PER': avg_PER, 'day_PER': {d: day_per[d]['total_ed'] / day_per[d]['total_len'] for d in day_per}}
 
 
