@@ -60,6 +60,10 @@ class GRUDecoderAttention(nn.Module):
             nn.ReLU(),
             nn.Linear(neural_dim*2, neural_dim*4),
             nn.ReLU(),
+            nn.Linear(neural_dim*2, neural_dim*4),
+            nn.ReLU(),
+            nn.Linear(neural_dim*2, neural_dim*4),
+            nn.ReLU(),
             nn.Linear(neural_dim*4, neural_dim)
         )
 
