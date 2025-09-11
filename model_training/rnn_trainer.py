@@ -335,7 +335,7 @@ class BrainToTextDecoder_Trainer:
     
 
     def train(self):
-        for epoch in range(self.args['num_epochs']):
+        for epoch in range(120000):
             self.train_loader.sampler.set_epoch(epoch)
             self.model.train()
             running_loss = 0.0
