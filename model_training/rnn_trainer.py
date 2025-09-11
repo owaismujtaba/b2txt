@@ -332,11 +332,18 @@ class BrainToTextDecoder_Trainer:
     # ----------------------------
     # Training Loop
     # ----------------------------
+    
+
     def train(self):
         for epoch in range(self.args['num_epochs']):
             self.train_loader.sampler.set_epoch(epoch)
             self.model.train()
-            for i, batch in enumerate(self.train_loader):
+            running_loss = 0.0
+            
+            # Wrap train_loader with tqdm
+            loop = tqdm(enumerate(self.train_loader), total=len(self.train_loader), desc=f"Epoch {epoch+1}/{self.args['num_epochs']}")
+            
+            for i, batch in loop:
                 features = batch['input_features'].to(self.device)
                 labels = batch['seq_class_ids'].to(self.device)
                 n_time_steps = batch['n_time_steps'].to(self.device)
@@ -355,16 +362,27 @@ class BrainToTextDecoder_Trainer:
                 self.optimizer.step()
                 self.learning_rate_scheduler.step()
 
+                running_loss += loss.item()
+                
+                # Update tqdm postfix with current loss and average loss
+                loop.set_postfix({
+                    'Batch Loss': f'{loss.item():.4f}',
+                    'Avg Loss': f'{running_loss / (i+1):.4f}'
+                })
+
+            # Validation after each epoch
             val_metrics = self.validation(self.val_loader)
-            self.logger.info(f"Epoch {epoch} validation PER: {val_metrics['avg_PER']:.4f}")
+            self.logger.info(f"Epoch {epoch+1} validation PER: {val_metrics['avg_PER']:.4f}")
 
             val_per = val_metrics['avg_PER']
             if val_per < self.best_val_PER:
-                self.logger.info("Checkpoinng model")
+                self.best_val_PER = val_per  # Update best PER
+                self.logger.info("Checkpointing model")
                 self.save_model_checkpoint(
-                    path = f"{self.args['checkpoint_dir']}/best_checkpoint",
+                    path=f"{self.args['checkpoint_dir']}/best_checkpoint",
                     PER=self.best_val_PER,
                 )
+
 
             
     # ----------------------------
