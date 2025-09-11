@@ -359,7 +359,6 @@ class BrainToTextDecoder_Trainer:
             
             # Wrap train_loader with tqdm
             pbar = tqdm(enumerate(self.train_loader), total=len(self.train_loader), desc="TRAINING")
-            pdb.set_trace()
             for i, batch in pbar:
                 features = batch['input_features'].to(self.device)
                 labels = batch['seq_class_ids'].to(self.device)
