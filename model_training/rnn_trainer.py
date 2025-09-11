@@ -37,6 +37,7 @@ class BrainToTextDecoder_Trainer:
         self.rank = rank
         self.world_size = world_size
         self.logger = self.setup_logger()
+        self.logger.info(" Initializing Trainner ")
         self.device = torch.device(f"cuda:{rank}" if torch.cuda.is_available() else "cpu")
         self.multi_gpu = world_size > 1
         self.logger.info(f"Using device {self.device}, rank {rank}/{world_size}")
@@ -348,6 +349,7 @@ class BrainToTextDecoder_Trainer:
     
 
     def train(self):
+        self.logger.info("Starting Training process")
         for epoch in range(self.args['dataset']['num_epochs']):
             self.train_loader.sampler.set_epoch(epoch)
             self.model.train()
