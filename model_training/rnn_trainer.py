@@ -362,7 +362,7 @@ class BrainToTextDecoder_Trainer:
             if val_per < self.best_val_PER:
                 self.logger.info("Checkpoinng model")
                 self.save_model_checkpoint(
-                    path=f'{self.args['checkpoint_dir']}/best_checkpoint',
+                    path=f'{self.args['checkpoint_dir']}',
                     PER=self.best_val_PER,
                 )
 
