@@ -56,11 +56,11 @@ class GRUDecoderAttention(nn.Module):
         # Day embeddings (additive)
         self.day_embed = nn.Embedding(n_days, neural_dim)
         self.day_mlp = nn.Sequential(
-            nn.Linear(1024, 2048),
+            nn.Linear(neural_dim, neural_dim*2),
             nn.ReLU(),
-            nn.Linear(2048, 4096),
+            nn.Linear(neural_dim*2, neural_dim*4),
             nn.ReLU(),
-            nn.Linear(4096, neural_dim)
+            nn.Linear(neural_dim*4, neural_dim)
         )
 
 
