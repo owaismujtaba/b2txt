@@ -65,6 +65,8 @@ class BrainToTextDecoder_Trainer:
         if self.multi_gpu:
             self.model = DDP(self.model, device_ids=[rank])
 
+        self._log_param_info()
+
         self.best_val_PER = torch.inf
         self.best_val_loss = torch.inf
 
@@ -85,6 +87,17 @@ class BrainToTextDecoder_Trainer:
         # ----------------------------
         if self.args.get('init_from_checkpoint', False):
             self.load_model_checkpoint(self.args['init_checkpoint_path'])
+
+    def _log_param_info(self):
+        total_params = sum(p.numel() for p in self.model.parameters())
+        self.logger.info(f"Model has {total_params:,} parameters")
+        day_params = 0
+        for name, param in self.model.named_parameters():
+            if 'day' in name:
+                day_params += param.numel()
+        
+        self.logger.info(f"Model has {day_params:,} day-specific parameters | {((day_params / total_params) * 100):.2f}% of total parameters")
+
 
     # ----------------------------
     # Logger and Seed
@@ -335,13 +348,13 @@ class BrainToTextDecoder_Trainer:
     
 
     def train(self):
-        for epoch in range(120000):
+        for epoch in range(self.args['dataset']['num_epochs']):
             self.train_loader.sampler.set_epoch(epoch)
             self.model.train()
             running_loss = 0.0
             
             # Wrap train_loader with tqdm
-            loop = tqdm(enumerate(self.train_loader), total=len(self.train_loader), desc=f"Epoch {epoch+1}/{self.args['num_epochs']}")
+            loop = tqdm(enumerate(self.train_loader), total=len(self.train_loader), desc=f"Epoch {epoch+1}/{self.args['dataset']['num_epochs']}")
             
             for i, batch in loop:
                 features = batch['input_features'].to(self.device)
